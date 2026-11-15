@@ -1,0 +1,20 @@
+--- a/crates/skyward/src/decrypt.rs
++++ b/crates/skyward/src/decrypt.rs
+@@ -43,7 +43,16 @@
+             .name("decrypt".into())
+             .spawn(move || {
+                 let ended_as = match job {
+-                    Job::Open => Ended::Opened(with_key_service(data::open_without_credential)),
++                    Job::Open => {
++                        // Data a recovery formatted afresh holds no encryption
++                        // and mounts without the secure world at all; only one
++                        // that does not goes the way of the key service.
++                        let ended = match data::open_unencrypted() {
++                            Ok(Some(opened)) => Ok(opened),
++                            _ => with_key_service(data::open_without_credential),
++                        };
++                        Ended::Opened(ended)
++                    }
+                     Job::Unlock { closed, user, credential } => {
+                         Ended::Unlocked(with_key_service(|service| data::unlock(service, &closed, user, &credential)))
+                     }

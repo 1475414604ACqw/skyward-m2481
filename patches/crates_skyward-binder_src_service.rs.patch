@@ -1,0 +1,54 @@
+--- a/crates/skyward-binder/src/service.rs
++++ b/crates/skyward-binder/src/service.rs
+@@ -34,7 +34,7 @@
+ /// its methods.
+ fn methods_of(sdk: u32) -> Methods {
+     match sdk >= LOOKUPS_DECLARED {
+-        true => Methods { check_service: 3, list_services: 6, is_declared: 9 },
++        true => Methods { check_service: 4, list_services: 6, is_declared: 9 },
+         false => Methods { check_service: 2, list_services: 4, is_declared: 7 },
+     }
+ }
+@@ -83,13 +83,41 @@
+     let directory = binder.directory()?;
+     let mut call = Parcel::call(DIRECTORY);
+     call.string(name);
+-    let reply = directory.transact(methods()?.check_service, &call).with_context(|| format!("look up {name}"))?;
++    // A directory built as another Android numbers its methods as that build
++    // did: try each numbering and keep the one that answers with a reply that
++    // reads.
++    let mut chosen = None;
++    for code in [methods()?.check_service, 2, 1, 4, 3] {
++        if let Ok(reply) = directory.transact(code, &call) {
++            if matches!(reply.read().i32(), Ok(0)) {
++                chosen = Some(code);
++                break;
++            }
++        }
++    }
++    let code = chosen.with_context(|| format!("look up {name}: the directory answered none of its numberings"))?;
++    let reply = directory.transact(code, &call).with_context(|| format!("look up {name}"))?;
+     let mut read = reply.read();
+     status::ok(&mut read).with_context(|| format!("look up {name}"))?;
++    if let Some(handle) = flat_handle(reply.bytes()) {
++        return Ok(Some(crate::driver::Handle::hold(binder, handle)?));
++    }
+     match read.object().with_context(|| format!("read what the directory answered for {name}"))? {
+         Some(handle) => Ok(Some(crate::driver::Handle::hold(binder, handle)?)),
+         None => Ok(None),
+     }
++}
++
++/// The handle of the binder a reply carries, found by its type word wherever
++/// the reply puts it: a directory built as a newer Android wraps the service
++/// it names in metadata this build does not know the shape of, and the binder
++/// itself is what the caller needs.
++fn flat_handle(bytes: &[u8]) -> Option<u32> {
++    // A flat_binder_object: its type, its flags, the handle, then the cookie.
++    const HANDLE: [u8; 4] = u32::from_be_bytes(*b"sh*\x85").to_le_bytes();
++    bytes.windows(4).enumerate().find_map(|(at, word)| {
++        (word == HANDLE && at + 12 <= bytes.len()).then(|| u32::from_le_bytes(bytes[at + 8..at + 12].try_into().unwrap()))
++    })
+ }
+ 
+ /// Every name registered with the directory, the directory's own among

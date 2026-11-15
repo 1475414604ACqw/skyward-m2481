@@ -1,0 +1,120 @@
+# Skyward 设备配置 — MEIZU 21 Pro (m2481)  v13
+#
+# v13 目标：binder 头部修好之后，把解密链路按 m2381 的成功经验补齐：
+# - modem 分区供 QSEE 读 TA（/vendor/firmware_mnt），解密必需；
+# - persist 挂载给 TEE 放文件；
+# - 各服务带上 ready_* 等待，顺序即拉起顺序：TEE 监听器 → 密钥服务 → 凭证服务。
+
+[device]
+codename = "meizu21pro"
+brand = "MEIZU"
+model = "MEIZU 21 Pro"
+# 内核里的设计容量是 5190mAh，机器宣传/系统设置里显示的是 5050mAh
+battery_mah = 5050
+ab = true
+soc = { hans = "第三代骁龙®8移动平台", hant = "Snapdragon® 8 Gen 3 行動平台", en = "Snapdragon® 8 Gen 3 Mobile Platform" }
+os_version_prop = "ro.build.display.id"
+
+[display]
+width = 1368
+height = 3192
+density = 480
+diagonal = 6.79
+corner_radius = 80
+
+[modules]
+sources = ["vendor_boot", "vendor_dlkm", "vendor"]
+load = ["goodix_ts", "haptic_aac"]
+
+# 固件分区的挂载交给下面那个 oneshot（本机 by-name 只有 modem_a/modem_b，
+# 而 fstab 里写的是 modem，[firmware] 的查找会失败并让整轮 bring-up 中止）。
+# persist 供 TEE 存放文件。
+[partitions]
+mounted = ["persist"]
+
+# ---- 原厂服务：顺序即拉起顺序，各自等自己的就绪标志 ----
+
+# 电量计固件跑在 ADSP 上：ADSP 不起，qti_battery_charger 就注册不出 battery
+# 电源，Skyward 的电池/温度就全是 0。
+#
+# 这里不依赖 [firmware] 的 fstab 查找（本机 by-name 里只有 modem_a/modem_b，
+# 没有 fstab 写的 modem），直接把 modem_a 挂到 /vendor/firmware_mnt 再按固件名
+# 找到 adsp 的 remoteproc 拉起来。
+[[service]]
+path = "/system/bin/sh"
+args = ["-c", "mkdir -p /vendor/firmware_mnt; mountpoint -q /vendor/firmware_mnt 2>/dev/null || mount -t vfat -o ro /dev/block/bootdevice/by-name/modem_a /vendor/firmware_mnt 2>/dev/null; for d in /sys/class/remoteproc/remoteproc*; do [ \"$(cat $d/firmware 2>/dev/null)\" = \"adsp.mdt\" ] && echo start > $d/state 2>/dev/null; done; true"]
+libraries = ["/system/lib64", "/vendor/lib64"]
+oneshot = true
+user = "root"
+groups = ["root"]
+
+# TEE 监听器：让安全世界能回到 Android 侧，KeyMint 用密钥的前提。
+[[service]]
+path = "/vendor/bin/qseecomd"
+libraries = ["/system/lib64", "/vendor/lib64", "/vendor/lib64/hw"]
+ready_property = "vendor.sys.listeners.registered"
+user = "root"
+groups = ["root", "drmrpc"]
+
+# 密钥服务（QTI AIDL），同时注册 secureclock / sharedsecret。
+[[service]]
+path = "/vendor/bin/hw/android.hardware.security.keymint-service-qti"
+libraries = ["/system/lib64", "/vendor/lib64", "/vendor/lib64/hw"]
+ready_service = "android.hardware.security.keymint.IKeyMintDevice/default"
+registers = [
+    "android.hardware.security.secureclock.ISecureClock/default",
+    "android.hardware.security.sharedsecret.ISharedSecret/default",
+]
+# 实测：root 起能注册，system 起注册不上（本机 vendor rc 写的是 system，但那依赖
+# SELinux 策略；permissive 底座上按 root 起更稳）。
+user = "root"
+groups = ["root", "drmrpc"]
+
+# 凭证服务：校验锁屏口令，并给 KeyMint 发放使用受锁屏保护密钥所需的备注。
+[[service]]
+path = "/vendor/bin/hw/android.hardware.gatekeeper-service-qti"
+libraries = ["/system/lib64", "/vendor/lib64", "/vendor/lib64/hw"]
+ready_service = "android.hardware.gatekeeper.IGatekeeper/default"
+# 与 keymint 同理：permissive 底座上以 root 起更稳，system 起注册不上。
+user = "root"
+groups = ["root", "drmrpc"]
+
+# 槽位控制。
+[[service]]
+path = "/vendor/bin/hw/android.hardware.boot-service.qti"
+libraries = ["/system/lib64", "/vendor/lib64", "/vendor/lib64/hw"]
+ready_service = "android.hardware.boot.IBootControl/default"
+user = "root"
+groups = ["root"]
+
+# ---- WLAN：驱动加载 → 等驱动稳定 → 挂固件 → 触发校准 → 等 wlan0 ----
+[wlan]
+modules = ["rfkill", "qca_cld3_kiwi_v2"]
+firmware = [
+    { name = "wlan/qca_cld/kiwi_v2/WCNSS_qcom_cfg.ini", path = "/vendor/etc/wifi/kiwi_v2/WCNSS_qcom_cfg.ini" },
+]
+# cnss2 的冷启动校准：驱动注册会被挂起，等驱动稳定后挂上 modem 固件再写 fs_ready，
+# 校准约 6 秒，完成后 wlan0 才出现。wait 是等驱动稳定的秒数，settle_ms 是校准给的毫秒。
+calibration = { partition = "modem_a", flag = "/sys/kernel/cnss/fs_ready", wait = 25, settle_ms = 8000 }
+interface = "wlan0"
+supplicant = "/system/bin/wpa_supplicant"
+libraries = ["/system/lib64", "/vendor/lib64"]
+service = "android.hardware.wifi.supplicant.ISupplicant/default"
+probe = "http://connect.rom.miui.com/generate_204"
+
+[haptics]
+# 本机用 AAC（RT6010）线性马达：按驱动名认设备（event 号会变）。
+# 另一路 qcom-hv-haptics 是 PM8550B 的，先不用。
+device = "aac-haptics"
+# 驱动通过 LED 接口接收 duration/activate，FF 接口收命令但不出力
+led = "/sys/class/leds/vibrator_5f"
+# 驱动在这两个文件里报谐振频率（"f0 = 1245" 这种带标签的格式，单位 0.1Hz）
+resonance = "/sys/devices/platform/soc/ac0000.qcom,qupv3_1_geni_se/a98000.i2c/i2c-9/9-005f/leds/vibrator_5f/lra_f0"
+strength = { lightest = 0.7, strongest = 1.0 }
+
+[backup]
+efs = ["modemst1", "modemst2", "fsg", "fsc", "persist"]
+data_skipped = ["vendor/tzstorage", "vendor/qtee", "vendor/fingerprint", "vendor/fpc", "vendor/goodix"]
+
+[wipe]
+logs = ["/data/mzlog", "/data/vendor/log", "/data/vendor/tombstones", "/data/vendor/ramdump"]

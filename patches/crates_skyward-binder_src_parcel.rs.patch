@@ -1,0 +1,28 @@
+--- a/crates/skyward-binder/src/parcel.rs
++++ b/crates/skyward-binder/src/parcel.rs
+@@ -3,7 +3,7 @@
+ /// The mark libbinder writes into every call header. Both ends have to agree
+ /// on it: it tells apart the copies of libbinder a phone carries, and the one
+ /// the recovery's own programs are built from is the recovery copy.
+-const HEADER: i32 = i32::from_be_bytes(*b"RECO");
++const HEADER: i32 = i32::from_le_bytes(*b"TSYS");
+ 
+ /// Strict mode gathers violations rather than acting on them; a caller with
+ /// no policy of its own still sets that bit.
+@@ -102,6 +102,16 @@
+             self.data.extend_from_slice(&u.to_le_bytes());
+         }
+         self.data.extend_from_slice(&0u16.to_le_bytes());
++        self.pad();
++    }
++
++    /// Text, as the count of its bytes, those bytes, a terminator, and
++    /// padding to the next four, as an interface that takes its text as
++    /// UTF-8 is given it.
++    pub fn string8(&mut self, s: &str) {
++        self.i32(s.len() as i32);
++        self.data.extend_from_slice(s.as_bytes());
++        self.data.push(0);
+         self.pad();
+     }
+ 

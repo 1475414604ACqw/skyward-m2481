@@ -1,0 +1,5 @@
+/target
+/out
+/work/stage2
+*.img
+.DS_Store
